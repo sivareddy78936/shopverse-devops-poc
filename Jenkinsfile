@@ -41,6 +41,7 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
+                      --user "$(id -u):$(id -g)" \
                       -v "$WORKSPACE/backend:/app" \
                       -w /app \
                       golang:1.24-alpine \
@@ -53,6 +54,7 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
+                      --user "$(id -u):$(id -g)" \
                       -v "$WORKSPACE/frontend:/app" \
                       -w /app \
                       node:18-alpine \
