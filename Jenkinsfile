@@ -42,6 +42,8 @@ pipeline {
                 sh '''
                     docker run --rm \
                       --user "$(id -u):$(id -g)" \
+                      -e GOCACHE=/tmp/go-build \
+                      -e GOPATH=/tmp/go \
                       -v "$WORKSPACE/backend:/app" \
                       -w /app \
                       golang:1.24-alpine \
@@ -55,6 +57,8 @@ pipeline {
                 sh '''
                     docker run --rm \
                       --user "$(id -u):$(id -g)" \
+                      -e HOME=/tmp/home \
+                      -e npm_config_cache=/tmp/npm-cache \
                       -v "$WORKSPACE/frontend:/app" \
                       -w /app \
                       node:18-alpine \
