@@ -179,100 +179,82 @@ ENVFILE
                       --force-recreate \
                       --remove-orphans
 
-                    echo "Waiting for services..."
-                    sleep 20
+                    echo "Initial service startup wait..."
+                    sleep 5
                 '''
             }
         }
 
         stage('Deployment Health Check') {
-            steps {
-                sh '''
-                    echo "===== COMPOSE STATUS ====="
-                    docker compose ps
+             steps {
+                  sh '''
+                       echo "===== DEPLOYMENT HEALTH CHECK ====="
 
-                    echo "===== MYSQL HEALTH ====="
-                    MYSQL_STATUS=$(docker inspect \
-                      --format '{{.State.Health.Status}}' \
-                      shopverse-mysql)
+                       MAX_ATTEMPTS=12
+                       SLEEP_SECONDS=5
+                       HEALTHY=false
 
-                    echo "MySQL status: ${MYSQL_STATUS}"
+            for ATTEMPT in $(seq 1 ${MAX_ATTEMPTS}); do
+                echo ""
+                echo "===== HEALTH CHECK ATTEMPT ${ATTEMPT}/${MAX_ATTEMPTS} ====="
 
-                    if [ "${MYSQL_STATUS}" != "healthy" ]; then
-                        echo "MySQL health check failed."
-                        exit 1
-                    fi
+                MYSQL_STATUS=$(docker inspect \
+                    --format '{{.State.Health.Status}}' \
+                    shopverse-mysql 2>/dev/null || echo "missing")
 
-                    echo "===== FRONTEND HEALTH ====="
-                    FRONTEND_STATUS=$(docker inspect \
-                      --format '{{.State.Health.Status}}' \
-                      shopverse-frontend)
+                FRONTEND_STATUS=$(docker inspect \
+                    --format '{{.State.Health.Status}}' \
+                    shopverse-frontend 2>/dev/null || echo "missing")
 
-                    echo "Frontend status: ${FRONTEND_STATUS}"
+                NGINX_STATUS=$(docker inspect \
+                    --format '{{.State.Health.Status}}' \
+                    shopverse-nginx 2>/dev/null || echo "missing")
 
-                    if [ "${FRONTEND_STATUS}" != "healthy" ]; then
-                        echo "Frontend health check failed."
-                        exit 1
-                    fi
+                BACKEND_HEALTH=$(docker exec \
+                    shopverse-nginx \
+                    sh -c "wget -q -O - http://backend:8080/health" \
+                    2>/dev/null || true)
 
-                    echo "===== NGINX HEALTH ====="
-                    NGINX_STATUS=$(docker inspect \
-                      --format '{{.State.Health.Status}}' \
-                      shopverse-nginx)
+                PUBLIC_HEALTH=$(curl -fsS \
+                    --max-time 5 \
+                    "http://${PUBLIC_HOST}/health" \
+                    2>/dev/null || true)
 
-                    echo "Nginx status: ${NGINX_STATUS}"
+                echo "MySQL status:    ${MYSQL_STATUS}"
+                echo "Frontend status: ${FRONTEND_STATUS}"
+                echo "Nginx status:    ${NGINX_STATUS}"
+                echo "Backend response: ${BACKEND_HEALTH}"
+                echo "Public response:  ${PUBLIC_HEALTH}"
 
-                    if [ "${NGINX_STATUS}" != "healthy" ]; then
-                        echo "Nginx health check failed."
-                        exit 1
-                    fi
+                if [ "${MYSQL_STATUS}" = "healthy" ] && \
+                   [ "${FRONTEND_STATUS}" = "healthy" ] && \
+                   [ "${NGINX_STATUS}" = "healthy" ] && \
+                   echo "${BACKEND_HEALTH}" | grep -q '"status":"healthy"' && \
+                   echo "${PUBLIC_HEALTH}" | grep -q '"status":"healthy"'; then
 
-                    echo "===== BACKEND HEALTH ====="
-                    BACKEND_HEALTH=$(docker exec \
-                      shopverse-nginx \
-                      sh -c "wget -q -O - \"\$(printf 'http://%s:8080/health' backend)\"")
-
-                    echo "Backend response: ${BACKEND_HEALTH}"
-
-                    echo "${BACKEND_HEALTH}" | grep -q '"status":"healthy"'
-
-                    echo "===== FRONTEND RESPONSE ====="
-                    docker exec \
-                      shopverse-nginx \
-                      sh -c "wget -q -O - \"\$(printf 'http://%s/' frontend)\"" \
-                      > /tmp/frontend-response.html
-
-                    test -s /tmp/frontend-response.html
-
-                    echo "Frontend response received successfully."
-
-                    echo "===== PUBLIC NGINX CHECK ====="
-                    curl -fsS -I \
-                      "http://${PUBLIC_HOST}" \
-                      | head -n 1
-
-                    echo "===== PUBLIC BACKEND HEALTH ====="
-                    curl -fsS \
-                      "http://${PUBLIC_HOST}/health"
-
-                    echo
+                    HEALTHY=true
+                    echo ""
                     echo "All deployment health checks passed."
-                '''
-            }
-        }
+                    break
+                fi
 
-        stage('Record Successful Version') {
-            steps {
-                sh '''
-                    echo "${BUILD_NUMBER}" > "${STATE_DIR}/last-successful-tag"
-                    chmod 600 "${STATE_DIR}/last-successful-tag"
+                if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+                    echo "Services are not ready yet. Waiting ${SLEEP_SECONDS}s..."
+                    sleep "${SLEEP_SECONDS}"
+                fi
+            done
 
-                    echo "Successful version recorded:"
-                    cat "${STATE_DIR}/last-successful-tag"
-                '''
-            }
-        }
+            echo ""
+            echo "===== FINAL COMPOSE STATUS ====="
+            docker compose ps
 
+            if [ "${HEALTHY}" != "true" ]; then
+                echo "Deployment health checks failed after ${MAX_ATTEMPTS} attempts."
+                exit 1
+            fi
+        '''
+    }
+}
         stage('Cleanup Old Application Images') {
             steps {
                 sh '''
@@ -328,17 +310,76 @@ ENVFILE
                            docker image inspect \
                           "${FRONTEND_IMAGE}:${PREVIOUS_TAG}" >/dev/null 2>&1; then
 
+                            echo "Restoring previous version ${PREVIOUS_TAG}..."
                             sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${PREVIOUS_TAG}/" .env 2>/dev/null || true
 
                             docker compose up -d \
                               --force-recreate \
                               --remove-orphans
 
-                            sleep 20
+                            MAX_ATTEMPTS=12
+                            SLEEP_SECONDS=5
+                            ROLLBACK_HEALTHY=false
 
+                            for ATTEMPT in $(seq 1 ${MAX_ATTEMPTS}); do
+                                echo ""
+                                echo "===== ROLLBACK HEALTH CHECK ${ATTEMPT}/${MAX_ATTEMPTS} ====="
+
+                                MYSQL_STATUS=$(docker inspect \
+                                  --format "{{.State.Health.Status}}" \
+                                  shopverse-mysql 2>/dev/null || echo "missing")
+
+                                FRONTEND_STATUS=$(docker inspect \
+                                  --format "{{.State.Health.Status}}" \
+                                  shopverse-frontend 2>/dev/null || echo "missing")
+
+                                NGINX_STATUS=$(docker inspect \
+                                  --format "{{.State.Health.Status}}" \
+                                  shopverse-nginx 2>/dev/null || echo "missing")
+
+                                BACKEND_HEALTH=$(docker exec \
+                                  shopverse-nginx \
+                                  sh -c "wget -q -O - http://backend:8080/health" \
+                                  2>/dev/null || true)
+
+                                PUBLIC_HEALTH=$(curl -fsS \
+                                  --max-time 5 \
+                                  "http://${PUBLIC_HOST}/health" \
+                                  2>/dev/null || true)
+
+                                echo "MySQL status:     ${MYSQL_STATUS}"
+                                echo "Frontend status:  ${FRONTEND_STATUS}"
+                                echo "Nginx status:     ${NGINX_STATUS}"
+                                echo "Backend response: ${BACKEND_HEALTH}"
+                                echo "Public response:  ${PUBLIC_HEALTH}"
+
+                                if [ "${MYSQL_STATUS}" = "healthy" ] && \
+                                   [ "${FRONTEND_STATUS}" = "healthy" ] && \
+                                   [ "${NGINX_STATUS}" = "healthy" ] && \
+                                    echo "${BACKEND_HEALTH}" | grep -q '"status":"healthy"' && \
+                                    echo "${PUBLIC_HEALTH}" | grep -q '"status":"healthy"'; then
+
+                                    ROLLBACK_HEALTHY=true
+                                    echo "Rollback health checks passed."
+                                    break
+                                fi
+
+                                if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+                                    echo "Rollback services are not ready yet. Waiting ${SLEEP_SECONDS}s..."
+                                    sleep "${SLEEP_SECONDS}"
+                                fi
+                            done
+
+                            echo ""
+                            echo "===== ROLLBACK COMPOSE STATUS ====="
                             docker compose ps
 
-                            echo "Rollback to version ${PREVIOUS_TAG} completed."
+                            if [ "${ROLLBACK_HEALTHY}" != "true" ]; then
+                                echo "Rollback health checks failed."
+                                exit 1
+                            fi
+
+                            echo "Rollback to version ${PREVIOUS_TAG} completed and verified successfully."
                         else
                             echo "Previous application images are not available."
                             echo "Rollback could not be performed."
